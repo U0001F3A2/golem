@@ -270,9 +270,11 @@ class FireworksTask(DockerizedTask):
         :param task_result: task result, can be binary data or list of files
         :param result_type: ResultType representation
         """
-
-        if verification_finished:
-            verification_finished(subtask_id, SubtaskVerificationState.VERIFIED, task_result)
+        try:
+            if verification_finished:
+                verification_finished()
+        except Exception as e:
+            logger.exception("")
         parent_fw = self.subtasks_fireworks_mapping[subtask_id]
         for child_fw in self.links[parent_fw]:
             # Remove completed parent link from each affected children
@@ -388,11 +390,7 @@ class FireworksTask(DockerizedTask):
         raise NotImplementedError()
 
     def should_accept_client(self, node_id):
-        if self.needs_computation():
-            return AcceptClientVerdict.ACCEPTED
-        else:
-            return AcceptClientVerdict.SHOULD_WAIT
-        
+        return AcceptClientVerdict.ACCEPTED
 
     def get_stdout(self, subtask_id) -> str:
         """ Return stdout received after computation of subtask_id, if there is no data available
