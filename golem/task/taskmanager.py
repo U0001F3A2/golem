@@ -386,7 +386,7 @@ class TaskManager(TaskEventListener):
             node_id, node_name, task_id, estimated_performance, price,
             max_resource_size, max_memory_size, num_cores, address,
         )
-
+        import pdb; pdb.set_trace()
         if not self.is_my_task(task_id):
             return None
 
@@ -734,7 +734,7 @@ class TaskManager(TaskEventListener):
             self.notice_task_updated(task_id,
                                      subtask_id=subtask_id,
                                      op=SubtaskOp.FINISHED)
-
+            import pdb; pdb.set_trace()
             if self.tasks_states[task_id].status in self.activeStatus:
                 if not self.tasks[task_id].finished_computation():
                     self.tasks_states[task_id].status = TaskStatus.computing

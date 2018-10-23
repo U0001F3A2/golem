@@ -1,5 +1,9 @@
+import copy
 import os
+import logging
 import yaml
+import queue
+
 from fireworks import LaunchPad, ScriptTask, Workflow
 from typing import List, Optional
 
@@ -16,6 +20,7 @@ from golem.task.taskbase import Task, ResultType, TaskState, TaskBuilder, \
                                 AcceptClientVerdict
 from golem.task.taskclient import TaskClient
 from golem_messages import idgenerator
+logger = logging.getLogger(__name__)
 
 class FireWorksTaskDefinition(TaskDefinition):
     def __init__(self):
@@ -152,7 +157,6 @@ class DockerizedTask(Task):
             src_code = script_file.read()
         super().__init__(th, src_code, task_definition)
 
-
 class FireworksTask(DockerizedTask):
     ENVIRONMENT_CLASS = FireworksTaskEnvironment
 
@@ -165,8 +169,26 @@ class FireworksTask(DockerizedTask):
         super().__init__(owner, task_definition, dir_manager)
         self.launchpad = launchpad
         self.workflow = workflow
+        logger.warn(workflow)
         self.launchpad.add_wf(self.workflow)
-        self.jobs_stacked = 0
+
+        # Data structure used to determine sequence in a workflow
+        self.links = copy.deepcopy(workflow.links)
+        self.parent_links = copy.deepcopy(workflow.links.parent_links)
+
+        self.work_queue = list()
+        for firework in self.get_ready_fireworks():
+            self.work_queue.append(firework.fw_id)
+        self.subtasks_fireworks_mapping = {}
+        self.progress = 0.0
+        self.counting_nodes = set()
+
+    def get_ready_fireworks(self):
+        fws = []
+        for fw in self.workflow.fws:
+            if fw.state == 'READY':
+                fws.append(fw)
+        return fws
 
     def initialize(self, dir_manager):
         """Called after adding a new task, may initialize or create some resources
@@ -174,13 +196,6 @@ class FireworksTask(DockerizedTask):
         :param DirManager dir_manager: DirManager instance for accessing temp dir for this task
         """
         pass
-
-    @staticmethod
-    def get_next_ready_firework(workflow):
-        for fw in workflow.fws:
-            if fw.state == "READY":
-                return fw.fw_id
-        raise Exception("No more fireworks")
 
     def _new_compute_task_def(self, subtask_id, extra_data,
                               perf_index=0):
@@ -190,7 +205,10 @@ class FireworksTask(DockerizedTask):
         ctd['subtask_id'] = subtask_id
         ctd['extra_data'] = extra_data
         ctd['extra_data']['launchpad'] = self.launchpad.to_dict()
-        ctd['extra_data']['fw_id'] = self.get_next_ready_firework(self.workflow)
+        fw_id = self.work_queue.pop(0)
+        self.subtasks_fireworks_mapping[subtask_id] = fw_id
+        logger.warn("Putting {} to work".format(fw_id))
+        ctd['extra_data']['fw_id'] = fw_id
         ctd['short_description'] = self.short_extra_data_repr(extra_data)
         ctd['src_code'] = self.src_code
         ctd['performance'] = perf_index
@@ -218,8 +236,6 @@ class FireworksTask(DockerizedTask):
         # verify calling criteria in upper level
         subtask_id = self.create_subtask_id()
         ctd = self._new_compute_task_def(subtask_id, dict(), 0)
-        self.jobs_stacked += 1
-        import pdb; pdb.set_trace()
         return Task.ExtraData(ctd=ctd)
 
     def query_extra_data_for_test_task(self) -> golem_messages.message.ComputeTaskDef:  # noqa pylint:disable=line-too-long
@@ -227,7 +243,7 @@ class FireworksTask(DockerizedTask):
 
     def short_extra_data_repr(self, extra_data: Task.ExtraData) -> str:
         """ Should return a short string with general task description that may be used for logging or stats gathering.
-        :param extra_data:
+        :param extra_data
         :return str:
         """
         return 'short extra data repr for fireworks task'
@@ -237,15 +253,13 @@ class FireworksTask(DockerizedTask):
         """ Return information if there are still some subtasks that may be dispended
         :return bool: True if there are still subtask that should be computed, False otherwise
         """
-        jobs_ready = sum([1 if firework.state == "READY" else 0 for firework in self.workflow.fws])
-        return jobs_ready - self.jobs_stacked > 0
+        return self.work_queue
 
     def finished_computation(self) -> bool:
         """ Return information if tasks has been fully computed
         :return bool: True if there is all tasks has been computed and verified
         """
-        import pdb; pdb.set_trace()
-        return False
+        return not self.work_queue and not self.subtasks_fireworks_mapping
 
     def computation_finished(self, subtask_id, task_result,
                              result_type=ResultType.DATA,
@@ -255,9 +269,17 @@ class FireworksTask(DockerizedTask):
         :param task_result: task result, can be binary data or list of files
         :param result_type: ResultType representation
         """
-        for fw in self.workflow.fws:
-            self.workflow.refresh(fw.fw_id)
-        self.jobs_stacked -= 1
+        parent_fw = self.subtasks_fireworks_mapping[subtask_id]
+        for child_fw in self.links[parent_fw]:
+            # Remove completed parent link from each affected children
+            self.parent_links[child_fw].remove(parent_fw)
+            # If there are no parent links it means that the firework is ready
+            if not self.parent_links[child_fw]:
+                logger.warn("Enqueued {}".format(child_fw))
+                self.work_queue.append(child_fw)
+        del self.subtasks_fireworks_mapping[subtask_id]
+        if self.finished_computation():
+            self.progress = 1.0
 
     def computation_failed(self, subtask_id):
         """ Inform that computation of a task with given id has failed
@@ -270,7 +292,6 @@ class FireworksTask(DockerizedTask):
         :param subtask_id:
         :return bool: True if a subtask passed verification, False otherwise
         """
-        import pdb; pdb.set_trace()
         return  True
 
     def verify_task(self):
@@ -326,7 +347,7 @@ class FireworksTask(DockerizedTask):
         :return float: Return number between 0.0 and 1.0.
         """
         # TODO analogical to get_total_tasks
-        return 0.5
+        return self.progress
 
     def get_resources(self) -> list:
         """ Return list of files that are need to compute this task."""
@@ -344,8 +365,7 @@ class FireworksTask(DockerizedTask):
         :param subtask_id:
         :return int:
         """
-        import pdb; pdb.set_trace()
-        pass  # Implement in derived class
+        return 1.0
 
     def add_resources(self, resources: set):
         """ Add resources to a task
@@ -364,10 +384,7 @@ class FireworksTask(DockerizedTask):
         raise NotImplementedError()
 
     def should_accept_client(self, node_id):
-        if self.needs_computation():
-            return AcceptClientVerdict.ACCEPTED
-        else:
-            return AcceptClientVerdict.SHOULD_WAIT
+
 
     def get_stdout(self, subtask_id) -> str:
         """ Return stdout received after computation of subtask_id, if there is no data available
@@ -431,5 +448,5 @@ class FireworksTask(DockerizedTask):
         if verdict == AcceptClientVerdict.ACCEPTED:
             client = TaskClient(node_id)
             client.start()
-
+        self.counting_nodes.add(node_id)
         return verdict
