@@ -1,9 +1,11 @@
 import copy
+import decimal
 import os
 import logging
 import yaml
 import queue
 
+from ethereum.utils import denoms
 from fireworks import LaunchPad, ScriptTask, Workflow
 from typing import List, Optional
 
@@ -104,6 +106,8 @@ class FireworksTaskBuilder(BasicTaskBuilder):
         apply(td, dictionary)
         td.timeout = string_to_timeout(dictionary['timeout'])
         td.subtask_timeout = string_to_timeout(dictionary['subtask_timeout'])
+        td.max_price = \
+            int(decimal.Decimal(dictionary['bid']) * denoms.ether)
         return td
 
 class FireworksBenchmarkTaskBuilder(FireworksTaskBuilder):
@@ -260,6 +264,7 @@ class FireworksTask(DockerizedTask):
         """ Return information if tasks has been fully computed
         :return bool: True if there is all tasks has been computed and verified
         """
+        logger.warn("{}".format(not self.work_queue and not self.subtasks_fireworks_mapping))
         return not self.work_queue and not self.subtasks_fireworks_mapping
 
     def computation_finished(self, subtask_id, task_result,
@@ -270,11 +275,6 @@ class FireworksTask(DockerizedTask):
         :param task_result: task result, can be binary data or list of files
         :param result_type: ResultType representation
         """
-        try:
-            if verification_finished:
-                verification_finished()
-        except Exception as e:
-            logger.exception("")
         parent_fw = self.subtasks_fireworks_mapping[subtask_id]
         for child_fw in self.links[parent_fw]:
             # Remove completed parent link from each affected children
@@ -284,8 +284,15 @@ class FireworksTask(DockerizedTask):
                 logger.warn("Enqueued {}".format(child_fw))
                 self.work_queue.append(child_fw)
         del self.subtasks_fireworks_mapping[subtask_id]
+
         if self.finished_computation():
             self.progress = 1.0
+
+        try:
+            if verification_finished:
+                verification_finished()
+        except Exception as e:
+            logger.exception("")
 
     def computation_failed(self, subtask_id):
         """ Inform that computation of a task with given id has failed
@@ -298,28 +305,26 @@ class FireworksTask(DockerizedTask):
         :param subtask_id:
         :return bool: True if a subtask passed verification, False otherwise
         """
-        return  True
+        return True
 
     def verify_task(self):
         """ Verify whole task after computation
         :return bool: True if task passed verification, False otherwise
         """
-        import pdb; pdb.set_trace()
-        return  True
+        return self.finished_computation()
 
     def get_total_tasks(self) -> int:
         """ Return total number of tasks that should be computed
         :return int: number should be greater than 0
         """
-        # TODO verify if fireworks gives a way to determine that in a dynamic workflow
-        return self.task_definition.subtasks_count
+        # It won't 
+        return len(self.workflow.links.nodes)
 
     def get_active_tasks(self) -> int:
         """ Return number of tasks that are currently being computed
         :return int: number should be between 0 and a result of get_total_tasks
         """
         # TODO return information on how many tasks were dispatched to the workers
-        import pdb; pdb.set_trace()
         return 1
 
     def get_tasks_left(self) -> int:
@@ -327,24 +332,20 @@ class FireworksTask(DockerizedTask):
         :return int: number should be between 0 and a result of get_total_tasks
         """
         # TODO analogical to get_total_tasks
-        import pdb; pdb.set_trace()
         return 1 - self.get_active_tasks()
 
     def restart(self):
         """ Restart all subtask computation for this task """
-        import pdb; pdb.set_trace()
         # TODO determine if needed and possible with fireworks
         return  # Implement in derived class
 
     def restart_subtask(self, subtask_id):
         """ Restart subtask with given id """
-        import pdb; pdb.set_trace()
         # TODO determine if needed and possible with fireworks
         return  # Implement in derived class
 
     def abort(self):
         """ Abort task and all computations """
-        import pdb; pdb.set_trace()
         # TODO determine how to do that 
         return  # Implement in derived class
 
@@ -377,7 +378,6 @@ class FireworksTask(DockerizedTask):
         """ Add resources to a task
         :param resources:
         """
-        import pdb; pdb.set_trace()
         return  # Implement in derived class
 
     def copy_subtask_results(
@@ -386,11 +386,13 @@ class FireworksTask(DockerizedTask):
         """
         Copy results of a single subtask from another task
         """
-        import pdb; pdb.set_trace()
         raise NotImplementedError()
 
     def should_accept_client(self, node_id):
-        return AcceptClientVerdict.ACCEPTED
+        if self.needs_computation():
+            return AcceptClientVerdict.ACCEPTED
+        else:
+            return AcceptClientVerdict.SHOULD_WAIT
 
     def get_stdout(self, subtask_id) -> str:
         """ Return stdout received after computation of subtask_id, if there is no data available
@@ -398,7 +400,6 @@ class FireworksTask(DockerizedTask):
         :param subtask_id:
         :return str:
         """
-        import pdb; pdb.set_trace()
         return ""
 
     def get_stderr(self, subtask_id) -> str:
@@ -407,7 +408,6 @@ class FireworksTask(DockerizedTask):
         :param subtask_id:
         :return str:
         """
-        import pdb; pdb.set_trace()
         return ""
 
     def get_results(self, subtask_id) -> List:
@@ -415,7 +415,6 @@ class FireworksTask(DockerizedTask):
         :param subtask_id:
         :return list:
         """
-        import pdb; pdb.set_trace()
         return []
 
     def result_incoming(self, subtask_id):
@@ -423,7 +422,6 @@ class FireworksTask(DockerizedTask):
         :param subtask_id:
         :return:
         """
-        import pdb; pdb.set_trace()
         pass
 
     def get_output_names(self) -> List:
@@ -436,7 +434,6 @@ class FireworksTask(DockerizedTask):
         """ Return list of states of final task results
         :return list:
         """
-        import pdb; pdb.set_trace()
         return []
 
     def to_dictionary(self):
